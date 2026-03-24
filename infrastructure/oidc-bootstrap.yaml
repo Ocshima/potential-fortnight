@@ -1,0 +1,195 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Bootstrap stack - creates the GitHub Actions OIDC provider and IAM role.
+  Deploy this ONCE per AWS account before the main stack.
+  No static credentials are stored anywhere; GitHub Actions authenticates
+  via short-lived OIDC tokens.
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Description: Your GitHub username or organisation (e.g. omar-a)
+
+  GitHubRepo:
+    Type: String
+    Description: Repository name (e.g. aws-secure-static-site)
+
+  MainStackName:
+    Type: String
+    Default: secure-static-site
+    Description: Name you will give the main stack (must match deploy workflow)
+
+Resources:
+
+  # ── GitHub OIDC Provider ────────────────────────────────────────
+  # One provider per AWS account is enough; skip if already exists.
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
+
+  # ── GitHub Actions Deployment Role ─────────────────────────────
+  GitHubActionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'GitHubActions-${GitHubRepo}-DeployRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GitHubOIDCProvider
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                # Only the main branch of your specific repo can assume this role
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main'
+      Policies:
+        - PolicyName: DeployPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+
+              # CloudFormation - deploy and manage the main stack
+              - Sid: CloudFormation
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:GetTemplate
+                  - cloudformation:ValidateTemplate
+                  - cloudformation:ListStackResources
+                Resource: !Sub 'arn:aws:cloudformation:us-east-1:${AWS::AccountId}:stack/${MainStackName}*'
+
+              # S3 - sync website content, manage log/results buckets
+              - Sid: S3Deploy
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub 'arn:aws:s3:::${AWS::AccountId}-*-content'
+                  - !Sub 'arn:aws:s3:::${AWS::AccountId}-*-content/*'
+
+              # S3 - bucket management for CloudFormation to create/configure
+              - Sid: S3BucketManagement
+                Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:DeleteBucket
+                  - s3:PutBucketVersioning
+                  - s3:PutBucketEncryption
+                  - s3:PutBucketPublicAccessBlock
+                  - s3:PutBucketLogging
+                  - s3:PutBucketPolicy
+                  - s3:DeleteBucketPolicy
+                  - s3:PutLifecycleConfiguration
+                  - s3:GetBucketPolicy
+                  - s3:GetBucketVersioning
+                  - s3:GetBucketEncryption
+                  - s3:GetBucketPublicAccessBlock
+                  - s3:GetBucketLogging
+                  - s3:GetLifecycleConfiguration
+                  - s3:PutOwnershipControls
+                  - s3:GetOwnershipControls
+                Resource: !Sub 'arn:aws:s3:::${AWS::AccountId}-*'
+
+              # CloudFront - create distribution and invalidate cache
+              - Sid: CloudFront
+                Effect: Allow
+                Action:
+                  - cloudfront:CreateDistribution
+                  - cloudfront:UpdateDistribution
+                  - cloudfront:DeleteDistribution
+                  - cloudfront:GetDistribution
+                  - cloudfront:GetDistributionConfig
+                  - cloudfront:CreateInvalidation
+                  - cloudfront:CreateOriginAccessControl
+                  - cloudfront:GetOriginAccessControl
+                  - cloudfront:DeleteOriginAccessControl
+                  - cloudfront:CreateFunction
+                  - cloudfront:UpdateFunction
+                  - cloudfront:DeleteFunction
+                  - cloudfront:PublishFunction
+                  - cloudfront:DescribeFunction
+                  - cloudfront:TagResource
+                Resource: '*'
+
+              # ACM - create and manage the TLS certificate
+              - Sid: ACM
+                Effect: Allow
+                Action:
+                  - acm:RequestCertificate
+                  - acm:DeleteCertificate
+                  - acm:DescribeCertificate
+                  - acm:ListCertificates
+                  - acm:AddTagsToCertificate
+                Resource: '*'
+
+              # WAFv2 - create and manage the Web ACL
+              - Sid: WAF
+                Effect: Allow
+                Action:
+                  - wafv2:CreateWebACL
+                  - wafv2:UpdateWebACL
+                  - wafv2:DeleteWebACL
+                  - wafv2:GetWebACL
+                  - wafv2:ListWebACLs
+                  - wafv2:TagResource
+                Resource: !Sub 'arn:aws:wafv2:us-east-1:${AWS::AccountId}:global/webacl/*'
+
+              # Route53 - create DNS records
+              - Sid: Route53
+                Effect: Allow
+                Action:
+                  - route53:ChangeResourceRecordSets
+                  - route53:GetChange
+                  - route53:ListResourceRecordSets
+                  - route53:GetHostedZone
+                Resource: '*'
+
+              # IAM - pass roles (needed for CloudFormation to create resources)
+              - Sid: IAMPassRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/GitHubActions-*'
+
+              # Athena and Glue - log analysis
+              - Sid: AthenaGlue
+                Effect: Allow
+                Action:
+                  - athena:CreateWorkGroup
+                  - athena:DeleteWorkGroup
+                  - athena:GetWorkGroup
+                  - athena:UpdateWorkGroup
+                  - glue:CreateDatabase
+                  - glue:DeleteDatabase
+                  - glue:GetDatabase
+                  - glue:CreateTable
+                  - glue:DeleteTable
+                  - glue:GetTable
+                  - glue:UpdateTable
+                Resource: '*'
+
+Outputs:
+  RoleArn:
+    Description: >
+      Paste this ARN into your GitHub repo secrets as AWS_ROLE_ARN
+    Value: !GetAtt GitHubActionsRole.Arn
+
+  OIDCProviderArn:
+    Description: OIDC Provider ARN
+    Value: !Ref GitHubOIDCProvider

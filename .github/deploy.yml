@@ -1,0 +1,256 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Minimal permissions at workflow level — jobs declare only what they need
+permissions:
+  contents: read
+
+# Cancel any in-progress run for the same branch (prevents stale deployments)
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: us-east-1
+  STACK_NAME: secure-static-site
+
+jobs:
+
+  # ── JOB 1: Lint CloudFormation ──────────────────────────────────
+  # Runs on every push/PR regardless of which files changed.
+  # Catches CloudFormation syntax errors and security misconfigurations
+  # before any AWS API calls are made.
+  lint:
+    name: Lint CloudFormation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install linting tools
+        run: |
+          pip install cfn-lint
+          # cfn-nag requires Ruby; use the Docker action or skip in favour of cfn-lint
+          # For a lightweight setup, cfn-lint covers the most common issues.
+
+      - name: Lint main template
+        run: cfn-lint infrastructure/template.yaml --include-checks W
+
+      - name: Lint bootstrap template
+        run: cfn-lint infrastructure/oidc-bootstrap.yaml --include-checks W
+
+  # ── JOB 2: Deploy Infrastructure ───────────────────────────────
+  # Only runs on push to main (not PRs) when infrastructure files change.
+  # Uses OIDC — no AWS access keys stored as secrets.
+  deploy-infra:
+    name: Deploy Infrastructure
+    runs-on: ubuntu-latest
+    needs: lint
+    # Only deploy on push to main, not on PRs
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      id-token: write   # Required for OIDC token request
+      contents: read
+    # Only trigger if infrastructure files actually changed
+    # Comment this out if you want to force a re-deploy without a file change
+    # (or use workflow_dispatch for manual triggers)
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          # role-session-name helps with CloudTrail auditing
+          role-session-name: GitHubActions-Deploy-${{ github.run_id }}
+
+      - name: Validate template against AWS
+        run: |
+          aws cloudformation validate-template \
+            --template-body file://infrastructure/template.yaml
+
+      - name: Deploy / update CloudFormation stack
+        run: |
+          aws cloudformation deploy \
+            --template-file infrastructure/template.yaml \
+            --stack-name ${{ env.STACK_NAME }} \
+            --parameter-overrides \
+                DomainName=${{ secrets.DOMAIN_NAME }} \
+                HostedZoneId=${{ secrets.HOSTED_ZONE_ID }} \
+                SubDomain=www \
+                Environment=prod \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset \
+            --tags \
+                Project=secure-static-site \
+                ManagedBy=GitHubActions \
+                Repository=${{ github.repository }} \
+                CommitSha=${{ github.sha }}
+
+      - name: Export stack outputs for subsequent job
+        id: stack-outputs
+        run: |
+          BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --query "Stacks[0].Outputs[?OutputKey=='ContentBucketName'].OutputValue" \
+            --output text)
+          DIST_ID=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDistributionId'].OutputValue" \
+            --output text)
+          echo "content_bucket=$BUCKET"   >> $GITHUB_OUTPUT
+          echo "distribution_id=$DIST_ID" >> $GITHUB_OUTPUT
+          echo "✅ Stack deployed. Bucket: $BUCKET | Distribution: $DIST_ID"
+
+    outputs:
+      content_bucket: ${{ steps.stack-outputs.outputs.content_bucket }}
+      distribution_id: ${{ steps.stack-outputs.outputs.distribution_id }}
+
+  # ── JOB 3: Deploy Website Content ──────────────────────────────
+  # Syncs the website/ directory to S3, then invalidates the CloudFront
+  # cache so visitors immediately see the new version.
+  # Runs after infra deploy (or standalone if only website/ files changed).
+  deploy-website:
+    name: Deploy Website
+    runs-on: ubuntu-latest
+    needs: [lint, deploy-infra]
+    if: |
+      always() &&
+      needs.lint.result == 'success' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main'
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-WebsiteDeploy-${{ github.run_id }}
+
+      - name: Resolve S3 bucket name
+        id: resolve
+        run: |
+          # Use output from deploy-infra job if available, otherwise read from stack
+          BUCKET="${{ needs.deploy-infra.outputs.content_bucket }}"
+          DIST_ID="${{ needs.deploy-infra.outputs.distribution_id }}"
+
+          if [ -z "$BUCKET" ]; then
+            BUCKET=$(aws cloudformation describe-stacks \
+              --stack-name ${{ env.STACK_NAME }} \
+              --query "Stacks[0].Outputs[?OutputKey=='ContentBucketName'].OutputValue" \
+              --output text)
+            DIST_ID=$(aws cloudformation describe-stacks \
+              --stack-name ${{ env.STACK_NAME }} \
+              --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDistributionId'].OutputValue" \
+              --output text)
+          fi
+
+          echo "bucket=$BUCKET"     >> $GITHUB_OUTPUT
+          echo "dist_id=$DIST_ID"   >> $GITHUB_OUTPUT
+
+      - name: Sync website files to S3
+        run: |
+          # HTML files: short cache (5 min) so content updates propagate quickly.
+          # Static assets (CSS, JS, images): long cache (1 year) for performance.
+          # CloudFront invalidation handles immediate refresh for HTML.
+
+          # Upload HTML with short cache headers
+          aws s3 sync website/ s3://${{ steps.resolve.outputs.bucket }}/ \
+            --exclude "*" \
+            --include "*.html" \
+            --cache-control "public, max-age=300, must-revalidate" \
+            --delete
+
+          # Upload all other assets with long cache headers
+          aws s3 sync website/ s3://${{ steps.resolve.outputs.bucket }}/ \
+            --exclude "*.html" \
+            --cache-control "public, max-age=31536000, immutable" \
+            --delete
+
+      - name: Invalidate CloudFront cache
+        run: |
+          INVALIDATION_ID=$(aws cloudfront create-invalidation \
+            --distribution-id ${{ steps.resolve.outputs.dist_id }} \
+            --paths "/*" \
+            --query 'Invalidation.Id' \
+            --output text)
+          echo "✅ Invalidation created: $INVALIDATION_ID"
+          echo "⏳ Waiting for invalidation to complete (~30-60 seconds)..."
+          aws cloudfront wait invalidation-completed \
+            --distribution-id ${{ steps.resolve.outputs.dist_id }} \
+            --id $INVALIDATION_ID
+          echo "✅ Cache invalidated. Site is live."
+
+      - name: Smoke test
+        run: |
+          # Basic availability check — exits non-zero if site returns non-2xx
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://${{ secrets.DOMAIN_NAME }}")
+          echo "HTTP status: $HTTP_STATUS"
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "❌ Smoke test failed - got HTTP $HTTP_STATUS"
+            exit 1
+          fi
+          echo "✅ Smoke test passed"
+
+  # ── JOB 4: Security Header Audit ───────────────────────────────
+  # Runs after website deploy to verify security headers are present.
+  # Uses Mozilla Observatory CLI for a quick automated audit.
+  security-audit:
+    name: Security Header Audit
+    runs-on: ubuntu-latest
+    needs: deploy-website
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Audit security headers
+        run: |
+          # Check each expected header is present in the response
+          HEADERS=$(curl -sI "https://${{ secrets.DOMAIN_NAME }}")
+          FAILED=0
+
+          check_header() {
+            if echo "$HEADERS" | grep -qi "$1"; then
+              echo "✅ $1"
+            else
+              echo "❌ MISSING: $1"
+              FAILED=1
+            fi
+          }
+
+          check_header "strict-transport-security"
+          check_header "x-content-type-options"
+          check_header "x-frame-options"
+          check_header "content-security-policy"
+          check_header "referrer-policy"
+          check_header "permissions-policy"
+
+          if [ "$FAILED" -eq 1 ]; then
+            echo "❌ One or more security headers are missing!"
+            exit 1
+          fi
+          echo "✅ All security headers present"

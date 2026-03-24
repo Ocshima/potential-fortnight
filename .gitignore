@@ -1,0 +1,17 @@
+# Credentials and Local Config
+.aws/
+.vscode/
+.env
+*.pem
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Infrastructure & Logs
+.cfnlintrc
+athena-query-results/
+*.log
+
+# S3 Sync artifacts (if any)
+.DS_Store

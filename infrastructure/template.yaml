@@ -1,0 +1,617 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Project 1 - Secure Static Website
+  Stack: S3 (OAC origin) -> CloudFront -> WAFv2 -> ACM -> Route53
+  Extras: CloudFront Function (security headers), S3 + CF access logging,
+          Athena/Glue for log analysis.
+
+Parameters:
+
+  DomainName:
+    Type: String
+    Description: Root domain (e.g. example.com). Must match your Route53 hosted zone.
+
+  SubDomain:
+    Type: String
+    Default: www
+    Description: Subdomain prefix. Both <domain> and <subdomain>.<domain> will be served.
+
+  HostedZoneId:
+    Type: String
+    Default: "none"
+#  HostedZoneId: -- Uncomment when using custom domain with ACM certs for CloudFront
+#    Type: AWS::Route53::HostedZone::Id
+#    Description: Route53 Hosted Zone ID for DomainName.
+
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [prod, staging]
+    Description: Used for tagging and minor config differences.
+
+  RateLimitThreshold:
+    Type: Number
+    Default: 2000
+    Description: >
+      Maximum requests per 5-minute window per IP before WAF blocks.
+      2000 is reasonable for a portfolio site; lower for stricter throttling.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Domain Configuration
+        Parameters: [DomainName, SubDomain, HostedZoneId]
+      - Label:
+          default: Stack Settings
+        Parameters: [Environment, RateLimitThreshold]
+
+# ────────────────────────────────────────────────────────────────────
+# RESOURCES
+# ────────────────────────────────────────────────────────────────────
+Resources:
+
+  # ── 1. LOGS BUCKET ──────────────────────────────────────────────
+  # Receives both CloudFront access logs and S3 server access logs.
+  # Retained on stack deletion so you never lose audit data.
+  LogsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${AWS::AccountId}-${DomainName}-logs'
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireLogs
+            Status: Enabled
+            ExpirationInDays: 90         # Adjust to your retention needs
+          - Id: TransitionToIA
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA  # Cheaper storage after 30 days
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: secure-static-site
+        - Key: Environment
+          Value: !Ref Environment
+
+  LogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LogsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Allow CloudFront to write access logs
+          - Sid: AllowCloudFrontLogs
+            Effect: Allow
+            Principal:
+              Service: delivery.logs.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${LogsBucket.Arn}/cloudfront/*'
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+                aws:SourceAccount: !Ref AWS::AccountId
+          # Allow S3 to write server access logs for ContentBucket
+          - Sid: AllowS3ServerAccessLogs
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${LogsBucket.Arn}/s3-access/*'
+            Condition:
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:aws:s3:::${AWS::AccountId}-${DomainName}-content'
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+          # Deny all non-HTTPS requests
+          - Sid: DenyNonHTTPS
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt LogsBucket.Arn
+              - !Sub '${LogsBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  # ── 2. CONTENT BUCKET ───────────────────────────────────────────
+  # Hosts the static website files. No public access — CloudFront
+  # is the only authorised reader via Origin Access Control (OAC).
+  ContentBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::AccountId}-${DomainName}-content'
+      VersioningConfiguration:
+        Status: Enabled   # Enables rollback if a bad deploy goes out
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LogsBucket
+        LogFilePrefix: s3-access/
+      Tags:
+        - Key: Project
+          Value: secure-static-site
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Bucket policy: only the specific CloudFront distribution may read objects.
+  # Using AWS:SourceArn scoped to the distribution (not just the account)
+  # follows least-privilege — no other distribution can read this bucket.
+  ContentBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DependsOn: CloudFrontDistribution
+    Properties:
+      Bucket: !Ref ContentBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontOAC
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${ContentBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}'
+          - Sid: DenyNonHTTPS
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt ContentBucket.Arn
+              - !Sub '${ContentBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  # ── 3. ATHENA RESULTS BUCKET ────────────────────────────────────
+  AthenaResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::AccountId}-${DomainName}-athena-results'
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireResults
+            Status: Enabled
+            ExpirationInDays: 30    # Query results don't need to live long
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ── 4. ACM TLS CERTIFICATE ──────────────────────────────────────
+  # DNS-validated — CloudFormation automatically creates the validation
+  # CNAME records in Route53 and waits for validation to complete.
+  # This can take 5–30 minutes on first deploy.
+#  Certificate: -- Uncomment when using custom domain with ACM certs for CloudFront
+#    Type: AWS::CertificateManager::Certificate
+#    Properties:
+#      DomainName: !Ref DomainName
+#      SubjectAlternativeNames:
+#        - !Sub '${SubDomain}.${DomainName}'
+#      ValidationMethod: DNS
+#      DomainValidationOptions:
+#        - DomainName: !Ref DomainName
+#          HostedZoneId: !Ref HostedZoneId
+#        - DomainName: !Sub '${SubDomain}.${DomainName}'
+#          HostedZoneId: !Ref HostedZoneId
+#      Tags:
+#        - Key: Project
+#          Value: secure-static-site
+
+  # ── 5. WAFv2 WEB ACL ────────────────────────────────────────────
+  # Scope: CLOUDFRONT (must be in us-east-1)
+  # Rules are evaluated in priority order (lower number = higher priority).
+  WebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub '${AWS::StackName}-web-acl'
+      Scope: CLOUDFRONT
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub '${AWS::StackName}-WebACL'
+      Rules:
+
+        # AWS managed ruleset: blocks common web exploits (OWASP Top 10 coverage)
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 10
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesCommonRuleSet
+
+        # Blocks requests from IPs with poor reputation (botnets, TOR exits, etc.)
+        - Name: AWSManagedRulesAmazonIpReputationList
+          Priority: 20
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAmazonIpReputationList
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesAmazonIpReputationList
+
+        # Blocks log4j, SSRF, and other known-bad input patterns
+        - Name: AWSManagedRulesKnownBadInputsRuleSet
+          Priority: 30
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesKnownBadInputsRuleSet
+
+        # Rate limit: block IPs exceeding threshold requests per 5 minutes.
+        # Provides basic DDoS and scraping protection.
+        - Name: RateLimitRule
+          Priority: 40
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: !Ref RateLimitThreshold
+              AggregateKeyType: IP
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: RateLimitRule
+
+  # ── 6. CLOUDFRONT FUNCTION — SECURITY HEADERS ───────────────────
+  # Runs at the edge on every viewer response (~sub-millisecond overhead).
+  # Applying headers here rather than in S3 metadata means they cover all
+  # responses (including CloudFront-generated error pages).
+  SecurityHeadersFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub '${AWS::StackName}-security-headers'
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Injects security response headers at the CloudFront edge
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+          var response = event.response;
+          var headers  = response.headers;
+
+          // ── HSTS ──────────────────────────────────────────────────
+          // Forces HTTPS for 2 years; includes subdomains; eligible for
+          // browser preload lists. Remove includeSubDomains if you have
+          // HTTP-only subdomains elsewhere on the same apex domain.
+          headers['strict-transport-security'] = {
+            value: 'max-age=63072000; includeSubDomains; preload'
+          };
+
+          // ── MIME sniffing ─────────────────────────────────────────
+          // Prevents browsers from guessing a different Content-Type.
+          headers['x-content-type-options'] = { value: 'nosniff' };
+
+          // ── Clickjacking ──────────────────────────────────────────
+          headers['x-frame-options'] = { value: 'DENY' };
+
+          // ── XSS filter (legacy IE/Chrome) ─────────────────────────
+          headers['x-xss-protection'] = { value: '1; mode=block' };
+
+          // ── Referrer policy ───────────────────────────────────────
+          // Sends origin only for cross-origin requests; full URL for same-origin.
+          headers['referrer-policy'] = {
+            value: 'strict-origin-when-cross-origin'
+          };
+
+          // ── Permissions policy ────────────────────────────────────
+          // Explicitly opt out of browser features this site does not need.
+          headers['permissions-policy'] = {
+            value: 'camera=(), microphone=(), geolocation=(), payment=(), usb=()'
+          };
+
+          // ── Content Security Policy ───────────────────────────────
+          // Tight policy for a static site with no external dependencies.
+          // Extend script-src / style-src if you add third-party libraries.
+          headers['content-security-policy'] = {
+            value: [
+              "default-src 'self'",
+              "script-src 'self'",
+              "style-src 'self' 'unsafe-inline'",  // relax if you use inline styles
+              "img-src 'self' data:",
+              "font-src 'self'",
+              "connect-src 'self'",
+              "object-src 'none'",
+              "base-uri 'self'",
+              "form-action 'self'",
+              "frame-ancestors 'none'",
+              "upgrade-insecure-requests"
+            ].join('; ')
+          };
+
+          return response;
+        }
+
+  # ── 7. ORIGIN ACCESS CONTROL ────────────────────────────────────
+  # OAC (successor to OAI) signs requests from CloudFront to S3 using
+  # SigV4. The S3 bucket policy validates the signature, meaning direct
+  # S3 URL access is always blocked — requests must come through CloudFront.
+  OriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-oac'
+        Description: OAC for S3 origin - SigV4 signed requests only
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # ── 8. CLOUDFRONT DISTRIBUTION ──────────────────────────────────
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    DependsOn:
+    #  - Certificate -- Uncomment when using ACM certs for CloudFront
+      - WebACL
+      - OriginAccessControl
+      - SecurityHeadersFunction
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub 'Secure static site - ${DomainName}'
+        #Aliases: -- Uncomment when using custom domain with ACM certs
+        #  - !Ref DomainName
+        #  - !Sub '${SubDomain}.${DomainName}'
+        DefaultRootObject: index.html
+        HttpVersion: http2and3       # Enables HTTP/3 (QUIC) for faster load times
+        IPV6Enabled: true
+        # PriceClass_100: US, Canada, Europe edge locations only.
+        # Cheapest option; covers the majority of web traffic.
+        # Change to PriceClass_All for global coverage.
+        PriceClass: PriceClass_100
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true  # Use default cert for *.cloudfront.net domain
+        #  AcmCertificateArn: !Ref Certificate -- Uncomment when using ACM certs for custom domain
+        #  SslSupportMethod: sni-only           # SNI is free; dedicated IP costs extra
+        #  MinimumProtocolVersion: TLSv1.2_2021 # Disables TLS 1.0 and 1.1
+          
+        WebACLId: !GetAtt WebACL.Arn
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt ContentBucket.RegionalDomainName  # Regional endpoint avoids redirect issues
+            OriginAccessControlId: !GetAtt OriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''  # Empty string required when using OAC (not OAI)
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https  # HTTP → HTTPS redirect at the edge
+          # CachingOptimized: caches based on query string and compression;
+          # suitable for static assets. TTL defaults: min 1s, default 86400s, max 31536000s.
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          Compress: true   # Gzip/Brotli compression for text assets
+          FunctionAssociations:
+            - EventType: viewer-response
+              FunctionARN: !GetAtt SecurityHeadersFunction.FunctionARN
+        CustomErrorResponses:
+          # Map S3 403s (access denied on missing objects) to our custom 404
+          - ErrorCode: 403
+            ResponseCode: 404
+            ResponsePagePath: /404.html
+            ErrorCachingMinTTL: 300
+          - ErrorCode: 404
+            ResponseCode: 404
+            ResponsePagePath: /404.html
+            ErrorCachingMinTTL: 300
+        Logging:
+          Bucket: !GetAtt LogsBucket.DomainName
+          Prefix: cloudfront/
+          IncludeCookies: false
+      Tags:
+        - Key: Project
+          Value: secure-static-site
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── 9. ROUTE53 DNS RECORDS ──────────────────────────────────────
+  # Both A (IPv4) and AAAA (IPv6) alias records for apex and subdomain.
+  # Alias records are free (unlike CNAME) and support the apex domain.
+  # Z2FDTNDATAQYW2 is the fixed CloudFront hosted zone ID (AWS constant).
+
+#  ApexIPv4:
+#    Type: AWS::Route53::RecordSet
+#    Properties:
+#      HostedZoneId: !Ref HostedZoneId
+#      Name: !Ref DomainName
+#      Type: A
+#      AliasTarget:
+#        DNSName: !GetAtt CloudFrontDistribution.DomainName
+#        HostedZoneId: Z2FDTNDATAQYW2
+#        EvaluateTargetHealth: false
+
+#  ApexIPv6:
+#    Type: AWS::Route53::RecordSet
+#    Properties:
+#      HostedZoneId: !Ref HostedZoneId
+#      Name: !Ref DomainName
+#      Type: AAAA
+#      AliasTarget:
+#        DNSName: !GetAtt CloudFrontDistribution.DomainName
+#        HostedZoneId: Z2FDTNDATAQYW2
+#        EvaluateTargetHealth: false
+
+#  SubdomainIPv4:
+#    Type: AWS::Route53::RecordSet
+#    Properties:
+#      HostedZoneId: !Ref HostedZoneId
+#      Name: !Sub '${SubDomain}.${DomainName}'
+#      Type: A
+#      AliasTarget:
+#        DNSName: !GetAtt CloudFrontDistribution.DomainName
+#        HostedZoneId: Z2FDTNDATAQYW2
+#        EvaluateTargetHealth: false
+
+#  SubdomainIPv6:
+#    Type: AWS::Route53::RecordSet
+#    Properties:
+#      HostedZoneId: !Ref HostedZoneId
+#      Name: !Sub '${SubDomain}.${DomainName}'
+#      Type: AAAA
+#      AliasTarget:
+#        DNSName: !GetAtt CloudFrontDistribution.DomainName
+#        HostedZoneId: Z2FDTNDATAQYW2
+#        EvaluateTargetHealth: false
+
+  # ── 10. ATHENA WORKGROUP ─────────────────────────────────────────
+  AthenaWorkgroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub '${AWS::StackName}-logs'
+      Description: Workgroup for querying CloudFront and S3 access logs
+      WorkGroupConfiguration:
+        ResultConfiguration:
+          OutputLocation: !Sub 's3://${AthenaResultsBucket}/results/'
+          EncryptionConfiguration:
+            EncryptionOption: SSE_S3
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: true
+        BytesScannedCutoffPerQuery: 1073741824  # 1 GB safety limit per query
+
+  # ── 11. GLUE DATABASE + TABLE (for Athena log queries) ──────────
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub '${AWS::StackName}_logs'
+        Description: Database for CloudFront access log analysis via Athena
+
+  CloudFrontLogsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueDatabase
+      TableInput:
+        Name: cloudfront_access_logs
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          "skip.header.line.count": "2"
+        StorageDescriptor:
+          Location: !Sub 's3://${LogsBucket}/cloudfront/'
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            # This is the most compatible SerDe for Athena
+            SerializationLibrary: org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe
+            Parameters:
+              "field.delim": "\t"
+              "serialization.format": "\t"
+          Columns:
+            - { Name: date, Type: string }
+            - { Name: time, Type: string }
+            - { Name: x_edge_location, Type: string }
+            - { Name: sc_bytes, Type: bigint }
+            - { Name: c_ip, Type: string }
+            - { Name: cs_method, Type: string }
+            - { Name: cs_host, Type: string }
+            - { Name: cs_uri_stem, Type: string }
+            - { Name: sc_status, Type: int }
+            - { Name: cs_referrer, Type: string }
+            - { Name: cs_user_agent, Type: string }
+            - { Name: cs_uri_query, Type: string }
+            - { Name: cs_cookie, Type: string }
+            - { Name: x_edge_result_type, Type: string }
+            - { Name: x_edge_request_id, Type: string }
+            - { Name: x_host_header, Type: string }
+            - { Name: cs_protocol, Type: string }
+            - { Name: cs_bytes, Type: bigint }
+            - { Name: time_taken, Type: float }
+            - { Name: x_forwarded_for, Type: string }
+            - { Name: ssl_protocol, Type: string }
+            - { Name: ssl_cipher, Type: string }
+            - { Name: x_edge_response_result_type, Type: string }
+            - { Name: cs_protocol_version, Type: string }
+            - { Name: fle_status, Type: string }
+            - { Name: fle_encrypt_id, Type: string }
+            - { Name: c_port, Type: int }
+            - { Name: time_to_first_byte, Type: float }
+            - { Name: x_edge_detailed_result_type, Type: string }
+            - { Name: sc_content_type, Type: string }
+            - { Name: sc_content_len, Type: bigint }
+            - { Name: sc_range_start, Type: bigint }
+            - { Name: sc_range_end, Type: bigint }
+
+# ────────────────────────────────────────────────────────────────────
+# OUTPUTS
+# ────────────────────────────────────────────────────────────────────
+Outputs:
+
+  WebsiteURL:
+    Description: Live website URL
+    Value: !Sub 'https://${DomainName}'
+
+  CloudFrontDomainName:
+    Description: CloudFront distribution domain (use for CNAME testing before DNS cut-over)
+    Value: !GetAtt CloudFrontDistribution.DomainName
+
+  CloudFrontDistributionId:
+    Description: Distribution ID — needed for cache invalidation in CI/CD
+    Value: !Ref CloudFrontDistribution
+    Export:
+      Name: !Sub '${AWS::StackName}-cf-distribution-id'
+
+  ContentBucketName:
+    Description: S3 bucket to deploy website files into
+    Value: !Ref ContentBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-content-bucket'
+
+  LogsBucketName:
+    Description: S3 bucket containing CloudFront and S3 access logs
+    Value: !Ref LogsBucket
+
+  AthenaWorkgroupName:
+    Description: Athena workgroup for log queries
+    Value: !Ref AthenaWorkgroup
+
+  GlueDatabaseName:
+    Description: Glue database name for Athena queries
+    Value: !Ref GlueDatabase
