@@ -503,6 +503,11 @@ Resources:
   # ── 10. ATHENA WORKGROUP ─────────────────────────────────────────
   AthenaWorkgroup:
     Type: AWS::Athena::WorkGroup
+    # Retain: the Makefile destroy target pre-deletes this with --recursive-delete-option
+    # (which clears query history that CloudFormation cannot clear itself).
+    # Without Retain, CloudFormation races the Makefile and fails if history exists.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       Name: !Sub '${AWS::StackName}-logs'
       Description: Workgroup for querying CloudFront and S3 access logs
@@ -607,6 +612,10 @@ Outputs:
   LogsBucketName:
     Description: S3 bucket containing CloudFront and S3 access logs
     Value: !Ref LogsBucket
+
+  AthenaResultsBucketName:
+    Description: S3 bucket for Athena query results — emptied by 'make empty-athena-results' before stack deletion
+    Value: !Ref AthenaResultsBucket
 
   AthenaWorkgroupName:
     Description: Athena workgroup for log queries

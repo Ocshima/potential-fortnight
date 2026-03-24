@@ -18,9 +18,13 @@ DIST_ID      ?= $(shell aws cloudformation describe-stacks \
                   --stack-name $(STACK_NAME) --region $(REGION) \
                   --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDistributionId'].OutputValue" \
                   --output text 2>/dev/null)
+ATHENA_BUCKET ?= $(shell aws cloudformation describe-stacks \
+                  --stack-name $(STACK_NAME) --region $(REGION) \
+                  --query "Stacks[0].Outputs[?OutputKey=='AthenaResultsBucketName'].OutputValue" \
+                  --output text 2>/dev/null)
 
 .PHONY: help lint validate deploy-bootstrap deploy-infra deploy-website \
-        invalidate outputs destroy
+        invalidate outputs destroy empty-bucket empty-athena-results clean-athena
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -39,7 +43,7 @@ validate: ## Validate templates against the CloudFormation API
 	@echo "✅ Template valid"
 
 # ── Bootstrap (run once) ─────────────────────────────────────
-deploy-bootstrap: ## Deploy the OIDC bootstrap stack (run once per account)
+deploy-bootstrap: ## Deploy the OIDC bootstrap stack
 	@[ -n "$(GITHUB_ORG)" ]  || (echo "❌ Set GITHUB_ORG=your-username" && exit 1)
 	@[ -n "$(GITHUB_REPO)" ] || (echo "❌ Set GITHUB_REPO=your-repo"    && exit 1)
 	aws cloudformation deploy \
@@ -51,16 +55,10 @@ deploy-bootstrap: ## Deploy the OIDC bootstrap stack (run once per account)
 	      MainStackName=$(STACK_NAME) \
 	  --capabilities CAPABILITY_NAMED_IAM \
 	  --region $(REGION)
-	@echo "✅ Bootstrap deployed. Copy the RoleArn output into GitHub secrets as AWS_ROLE_ARN"
-	aws cloudformation describe-stacks \
-	  --stack-name github-oidc-bootstrap \
-	  --region $(REGION) \
-	  --query "Stacks[0].Outputs"
+	@echo "✅ Bootstrap deployed. Copy the RoleArn output into GitHub secrets"
 
 # ── Main Stack ───────────────────────────────────────────────
 deploy-infra: lint validate ## Deploy / update the main infrastructure stack
-#	@[ -n "$(DOMAIN_NAME)" ]    || (echo "❌ Set DOMAIN_NAME=yourdomain.com"      && exit 1)
-#	@[ -n "$(HOSTED_ZONE_ID)" ] || (echo "❌ Set HOSTED_ZONE_ID=ZXXXXXXXXXXXXX"   && exit 1)
 	aws cloudformation deploy \
 	  --template-file infrastructure/template.yaml \
 	  --stack-name $(STACK_NAME) \
@@ -76,8 +74,8 @@ deploy-infra: lint validate ## Deploy / update the main infrastructure stack
 	@$(MAKE) outputs
 
 deploy-website: ## Sync website files to S3 and invalidate CloudFront
-	@[ -n "$(BUCKET)" ]  || (echo "❌ Could not resolve bucket — is the stack deployed?" && exit 1)
-	@[ -n "$(DIST_ID)" ] || (echo "❌ Could not resolve distribution ID"                 && exit 1)
+	@[ -n "$(BUCKET)" ]  || (echo "❌ Could not resolve bucket" && exit 1)
+	@[ -n "$(DIST_ID)" ] || (echo "❌ Could not resolve distribution ID" && exit 1)
 	@echo "📦 Syncing HTML files..."
 	aws s3 sync website/ s3://$(BUCKET)/ \
 	  --exclude "*" --include "*.html" \
@@ -90,12 +88,12 @@ deploy-website: ## Sync website files to S3 and invalidate CloudFront
 	  --delete --region $(REGION)
 	@$(MAKE) invalidate
 
-invalidate: ## Create a CloudFront cache invalidation for /*
+invalidate: ## Create a CloudFront cache invalidation
 	@[ -n "$(DIST_ID)" ] || (echo "❌ Could not resolve distribution ID" && exit 1)
 	aws cloudfront create-invalidation \
 	  --distribution-id $(DIST_ID) \
 	  --paths "/*"
-	@echo "✅ Invalidation submitted for distribution $(DIST_ID)"
+	@echo "✅ Invalidation submitted"
 
 outputs: ## Print CloudFormation stack outputs
 	aws cloudformation describe-stacks \
@@ -105,30 +103,47 @@ outputs: ## Print CloudFormation stack outputs
 	  --output table
 
 # ── Teardown ─────────────────────────────────────────────────
-empty-bucket: ## Use s3api to remove all versions and delete markers (Required for versioned buckets)
+empty-bucket: ## Empty the versioned content bucket (versions + delete markers)
 	@echo "🗑️  Emptying versioned content bucket: $(BUCKET)"
 	@if [ -n "$(BUCKET)" ]; then \
-		VERSIONS=$$(aws s3api list-object-versions --bucket $(BUCKET) --output json --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}'); \
-		if [ "$$VERSIONS" != '{"Objects": null}' ]; then \
-			aws s3api delete-objects --bucket $(BUCKET) --delete "$$VERSIONS"; \
+		VERSIONS=$$(aws s3api list-object-versions --bucket $(BUCKET) --query 'Versions[].{Key:Key,VersionId:VersionId}' --output json); \
+		if [ "$$VERSIONS" != "null" ] && [ "$$VERSIONS" != "[]" ]; then \
+			aws s3api delete-objects --bucket $(BUCKET) --delete "{\"Objects\":$$VERSIONS}"; \
 		fi; \
-		MARKERS=$$(aws s3api list-object-versions --bucket $(BUCKET) --output json --query '{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}'); \
-		if [ "$$MARKERS" != '{"Objects": null}' ]; then \
-			aws s3api delete-objects --bucket $(BUCKET) --delete "$$MARKERS"; \
+		MARKERS=$$(aws s3api list-object-versions --bucket $(BUCKET) --query 'DeleteMarkers[].{Key:Key,VersionId:VersionId}' --output json); \
+		if [ "$$MARKERS" != "null" ] && [ "$$MARKERS" != "[]" ]; then \
+			aws s3api delete-objects --bucket $(BUCKET) --delete "{\"Objects\":$$MARKERS}"; \
 		fi; \
 	fi
+	@echo "✅ Content bucket emptied."
 
-destroy: ## ⚠️  Delete the main stack and all resources (including versioned S3 content)
-	@echo "⚠️  This will delete all resources in stack: $(STACK_NAME)"
-	@echo "   The LogsBucket will be RETAINED (DeletionPolicy: Retain)"
+empty-athena-results: ## Empty the Athena query results bucket (no versioning)
+	@echo "🗑️  Emptying Athena results bucket: $(ATHENA_BUCKET)"
+	@if [ -n "$(ATHENA_BUCKET)" ]; then \
+		aws s3 rm s3://$(ATHENA_BUCKET) --recursive --region $(REGION) 2>/dev/null || true; \
+	fi
+	@echo "✅ Athena results bucket emptied." 
+
+clean-athena: ## Force-delete the Athena WorkGroup and all its contents
+	@echo "🧹 Force-deleting Athena WorkGroup: $(STACK_NAME)-logs"
+	@# --recursive-delete-option removes the workgroup AND all query history in one call.
+	@# batch-delete-query-execution does NOT clear history, so CloudFormation would still
+	@# see a non-empty workgroup and fail. The workgroup has DeletionPolicy: Retain in the
+	@# template so CloudFormation skips it cleanly after this pre-delete step.
+	@aws athena delete-work-group \
+		--work-group $(STACK_NAME)-logs \
+		--recursive-delete-option \
+		--region $(REGION) 2>/dev/null \
+	  && echo "✅ Athena WorkGroup deleted." \
+	  || echo "ℹ️  WorkGroup not found or already deleted — continuing."
+
+destroy: ## ⚠️ Delete stack and all resources 
+	@echo "⚠️  Deleting stack: $(STACK_NAME)"
 	@read -p "   Type the stack name to confirm: " confirm; \
-	  [ "$$confirm" = "$(STACK_NAME)" ] || (echo "Aborted." && exit 1)
+	  [ "$$confirm" = "$(STACK_NAME)" ] || (echo "Aborted." && exit 1) 
 	@$(MAKE) empty-bucket
-	@echo "🗑️  Deleting CloudFormation stack..."
-	aws cloudformation delete-stack \
-	  --stack-name $(STACK_NAME) \
-	  --region $(REGION)
-	aws cloudformation wait stack-delete-complete \
-	  --stack-name $(STACK_NAME) \
-	  --region $(REGION)
-	@echo "✅ Stack deleted. LogsBucket is retained — empty and delete it manually if needed."
+	@$(MAKE) empty-athena-results
+	@$(MAKE) clean-athena
+	aws cloudformation delete-stack --stack-name $(STACK_NAME) --region $(REGION)
+	aws cloudformation wait stack-delete-complete --stack-name $(STACK_NAME) --region $(REGION)
+	@echo "✅ Stack deleted."
