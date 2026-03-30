@@ -98,6 +98,7 @@ jobs:
       - name: Install scanners
         run: |
           pip install checkov
+          sudo apt-get install -y build-essential ruby-dev
           sudo gem install cfn-nag
 
       - name: Run cfn-nag
