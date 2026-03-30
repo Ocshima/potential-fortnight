@@ -98,7 +98,7 @@ jobs:
       - name: Install scanners
         run: |
           pip install checkov
-          gem install cfn-nag
+          sudo gem install cfn-nag
 
       - name: Run cfn-nag
         run: |

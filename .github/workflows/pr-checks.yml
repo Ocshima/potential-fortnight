@@ -82,7 +82,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install cfn-nag
-        run: gem install cfn-nag
+        run: sudo gem install cfn-nag
 
       - name: Run cfn-nag
         id: nag
