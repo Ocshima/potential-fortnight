@@ -52,7 +52,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: pip
 
       - name: Install cfn-lint
         run: pip install cfn-lint
@@ -92,7 +91,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: pip
 
       - name: Install scanners
         run: |
