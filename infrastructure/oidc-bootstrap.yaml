@@ -91,7 +91,7 @@ Resources:
                   - s3:CreateBucket
                   - s3:DeleteBucket
                   - s3:PutBucketVersioning
-                  - s3:PutBucketEncryption
+                  - s3:PutEncryptionConfiguration
                   - s3:PutBucketPublicAccessBlock
                   - s3:PutBucketLogging
                   - s3:PutBucketPolicy
@@ -99,12 +99,12 @@ Resources:
                   - s3:PutLifecycleConfiguration
                   - s3:GetBucketPolicy
                   - s3:GetBucketVersioning
-                  - s3:GetBucketEncryption
+                  - s3:GetEncryptionConfiguration
                   - s3:GetBucketPublicAccessBlock
                   - s3:GetBucketLogging
                   - s3:GetLifecycleConfiguration
-                  - s3:PutOwnershipControls
-                  - s3:GetOwnershipControls
+                  - s3:PutBucketOwnershipControls
+                  - s3:GetBucketOwnershipControls
                 Resource: !Sub 'arn:aws:s3:::${AWS::AccountId}-*'
 
               # CloudFront - create distribution and invalidate cache

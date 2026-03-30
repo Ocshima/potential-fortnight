@@ -11,14 +11,14 @@ Parameters:
     Type: String
     Description: Root domain (e.g. example.com). Must match your Route53 hosted zone.
 
-  SubDomain:
-    Type: String
-    Default: www
-    Description: Subdomain prefix. Both <domain> and <subdomain>.<domain> will be served.
+#  SubDomain:
+#    Type: String
+#    Default: www
+#    Description: Subdomain prefix. Both <domain> and <subdomain>.<domain> will be served.
 
-  HostedZoneId:
-    Type: String
-    Default: "none"
+#  HostedZoneId:
+#    Type: String
+#    Default: "none"
 #  HostedZoneId: -- Uncomment when using custom domain with ACM certs for CloudFront
 #    Type: AWS::Route53::HostedZone::Id
 #    Description: Route53 Hosted Zone ID for DomainName.
@@ -41,7 +41,7 @@ Metadata:
     ParameterGroups:
       - Label:
           default: Domain Configuration
-        Parameters: [DomainName, SubDomain, HostedZoneId]
+        Parameters: [DomainName] #, SubDomain, HostedZoneId]
       - Label:
           default: Stack Settings
         Parameters: [Environment, RateLimitThreshold]
@@ -172,7 +172,7 @@ Resources:
   # follows least-privilege — no other distribution can read this bucket.
   ContentBucketPolicy:
     Type: AWS::S3::BucketPolicy
-    DependsOn: CloudFrontDistribution
+#    DependsOn: CloudFrontDistribution
     Properties:
       Bucket: !Ref ContentBucket
       PolicyDocument:
@@ -430,11 +430,11 @@ Resources:
               MinimumProtocolVersion: TLSv1.2_2021 is enforced via the ACM
               certificate block (see commented section in template). TLS is
               still enforced end-to-end via the default certificate.
-    DependsOn:
+#    DependsOn:
     #  - Certificate -- Uncomment when using ACM certs for CloudFront
-      - WebACL
-      - OriginAccessControl
-      - SecurityHeadersFunction
+#      - WebACL
+#      - OriginAccessControl
+#      - SecurityHeadersFunction
     Properties:
       DistributionConfig:
         Enabled: true
