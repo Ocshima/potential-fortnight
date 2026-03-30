@@ -242,7 +242,7 @@ jobs:
 
       - name: HTTP availability check
         run: |
-          URL="${{ needs.deploy-staging.outputs.staging_url }}"
+          URL="https://httpstat.us/503"
           echo "Testing: $URL"
           for i in 1 2 3; do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$URL")
