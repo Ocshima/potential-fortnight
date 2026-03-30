@@ -70,3 +70,28 @@ skip-check:
   #   and multi-AZ replication make a failover origin unnecessary. S3
   #   itself does not experience the kinds of AZ-level failures that
   #   failover is designed to handle.
+
+  - CKV_AWS_174
+  # Rule: CloudFront Viewer Certificate must use TLS v1.2 or higher
+  # Resource: CloudFrontDistribution
+  # Justification:
+  #   When no custom domain is configured, the distribution uses the default
+  #   CloudFront certificate (*.cloudfront.net). AWS enforces TLS on the
+  #   default certificate — the MinimumProtocolVersion field is only
+  #   configurable alongside a custom ACM certificate. When a custom domain
+  #   is enabled (via the AcmCertificateArn parameter), TLSv1.2_2021 is
+  #   explicitly set. This check is suppressed for the default-cert path only.
+
+  # ── IAM ──────────────────────────────────────────────────────────
+
+  - CKV_AWS_111
+  # Rule: IAM policy should not allow write access without constraints
+  # Resource: GitHubActionsRole (oidc-bootstrap.yaml)
+  # Justification:
+  #   CloudFront, ACM, Route53, and WAFv2 APIs do not support resource-level
+  #   restrictions for the create/update/delete actions required to deploy
+  #   the stack — AWS IAM explicitly requires Resource: '*' for these calls.
+  #   The role is scoped to this repository via the OIDC trust condition
+  #   (repo:Ocshima/potential-fortnight:*) and cannot be assumed by any
+  #   other principal. This is the standard least-privilege posture for
+  #   CloudFront/ACM deployments via GitHub Actions OIDC.

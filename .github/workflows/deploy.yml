@@ -23,6 +23,7 @@ env:
   AWS_REGION: us-east-1
   PROD_STACK:    secure-static-site
   STAGING_STACK: secure-static-site-staging
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PIPELINE OVERVIEW
