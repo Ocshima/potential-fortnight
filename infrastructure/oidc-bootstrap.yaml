@@ -68,6 +68,11 @@ Resources:
                   - cloudformation:DescribeStackEvents
                   - cloudformation:GetTemplate
                   - cloudformation:ListStackResources
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:ListChangeSets
                 Resource: !Sub 'arn:aws:cloudformation:us-east-1:${AWS::AccountId}:stack/${MainStackName}*'
 
               # cloudformation:ValidateTemplate is a service-level API (no stack resource)
