@@ -75,11 +75,12 @@ Resources:
                   - cloudformation:ListChangeSets
                 Resource: !Sub 'arn:aws:cloudformation:us-east-1:${AWS::AccountId}:stack/${MainStackName}*'
 
-              # cloudformation:ValidateTemplate is a service-level API (no stack resource)
-              - Sid: CloudFormationValidate
+              # Service-level CloudFormation APIs that do not operate on a specific stack resource
+              - Sid: CloudFormationGlobal
                 Effect: Allow
                 Action:
                   - cloudformation:ValidateTemplate
+                  - cloudformation:GetTemplateSummary
                 Resource: '*'
 
               # S3 - sync website content, manage log/results buckets
