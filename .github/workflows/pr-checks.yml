@@ -149,8 +149,7 @@ jobs:
             --directory infrastructure/ \
             --framework cloudformation \
             --config-file .checkov.yaml \
-            --output cli \
-            --soft-fail
+            --output cli
           EXIT_CODE=$?
           set -e
 
@@ -225,7 +224,8 @@ jobs:
               outcome === 'failure' ? '❌' : '⚠️';
 
             const allPassed = [lintOutcome, nagOutcome, checkovOutcome]
-              .every(o => o === 'success');
+              .every(o => o === 'success')
+              && parseInt(checkovFailed) === 0;
 
             const body = `## 🔐 IaC Security Scan Results
 
