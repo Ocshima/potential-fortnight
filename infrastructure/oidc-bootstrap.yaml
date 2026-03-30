@@ -141,6 +141,8 @@ Resources:
                   - cloudfront:PublishFunction
                   - cloudfront:DescribeFunction
                   - cloudfront:TagResource
+                  - cloudfront:UntagResource
+                  - cloudfront:ListTagsForResource
                 Resource: '*'
 
               # ACM - create and manage the TLS certificate
@@ -198,6 +200,9 @@ Resources:
                   - athena:DeleteWorkGroup
                   - athena:GetWorkGroup
                   - athena:UpdateWorkGroup
+                  - athena:TagResource
+                  - athena:UntagResource
+                  - athena:ListTagsForResource
                   - glue:CreateDatabase
                   - glue:DeleteDatabase
                   - glue:GetDatabase
@@ -205,6 +210,8 @@ Resources:
                   - glue:DeleteTable
                   - glue:GetTable
                   - glue:UpdateTable
+                  - glue:TagResource
+                  - glue:UntagResource
                 Resource: '*'
 
 Outputs:
