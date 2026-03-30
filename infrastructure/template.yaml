@@ -67,7 +67,7 @@ Resources:
               Enabling access logging on the logging bucket itself is circular
               and explicitly not supported by AWS.
     Properties:
-      BucketName: !Sub '${AWS::AccountId}-${DomainName}-logs'
+      BucketName: !Sub '${AWS::AccountId}-${DomainName}-${Environment}-logs'
       OwnershipControls:
         Rules:
           - ObjectOwnership: BucketOwnerPreferred
@@ -125,7 +125,7 @@ Resources:
             Resource: !Sub '${LogsBucket.Arn}/s3-access/*'
             Condition:
               ArnLike:
-                aws:SourceArn: !Sub 'arn:aws:s3:::${AWS::AccountId}-${DomainName}-content'
+                aws:SourceArn: !Sub 'arn:aws:s3:::${AWS::AccountId}-${DomainName}-${Environment}-content'
               StringEquals:
                 aws:SourceAccount: !Ref AWS::AccountId
           # Deny all non-HTTPS requests
@@ -146,7 +146,7 @@ Resources:
   ContentBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub '${AWS::AccountId}-${DomainName}-content'
+      BucketName: !Sub '${AWS::AccountId}-${DomainName}-${Environment}-content'
       VersioningConfiguration:
         Status: Enabled   # Enables rollback if a bad deploy goes out
       BucketEncryption:
@@ -215,7 +215,7 @@ Resources:
               Query results are transient outputs — versioning would retain
               every result set and significantly increase storage costs.
     Properties:
-      BucketName: !Sub '${AWS::AccountId}-${DomainName}-athena-results'
+      BucketName: !Sub '${AWS::AccountId}-${DomainName}-${Environment}-athena-results'
       LifecycleConfiguration:
         Rules:
           - Id: ExpireResults
