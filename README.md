@@ -8,7 +8,8 @@ A production-grade static website on AWS, built to demonstrate secure cloud arch
 
 ![Project Architecture](./assets/infra-diagram.svg)
 
-(./assets/cicd-pipeline-diagram.svg)
+
+![CI/CD Pipeline](./assets/cicd-pipeline-diagram.svg)
 
 The deployment pipeline wrapping this infrastructure is documented in [docs/devsecops-pipeline.md](./docs/devsecops-pipeline.md).
 
@@ -125,7 +126,7 @@ Two workflow files implement a full DevSecOps pipeline. See [docs/devsecops-pipe
 
 **`deploy.yml`** — triggers on push to `main`.
 
-(./assets/cicd-detailed-diagram.svg)
+![CI/CD Pipeline Detailed](./assets/cicd-detailed-diagram.svg)
 
 | Stage | What it does |
 |---|---|

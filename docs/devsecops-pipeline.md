@@ -10,7 +10,7 @@ Initially, this project shipped with a simple four-job pipeline: lint → deploy
 
 Now, it is updated:
 
-(./assets/cicd-detailed-diagram.svg)
+![CI/CD Pipeline Detailed](./assets/cicd-detailed-diagram.svg)
 
 ---
 
