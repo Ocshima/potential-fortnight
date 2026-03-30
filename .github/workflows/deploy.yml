@@ -140,13 +140,14 @@ jobs:
             --framework cloudformation \
             --config-file .checkov.yaml \
             --output sarif \
-            --soft-fail > checkov-results.sarif
+            --soft-fail \
+            --output-file-path .
 
       - name: Upload SARIF to Security tab
         uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
-          sarif_file: checkov-results.sarif
+          sarif_file: results_sarif.sarif
           category: checkov-deploy
 
   # ── STAGE 3: Deploy to Staging ───────────────────────────────────

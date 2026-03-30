@@ -154,12 +154,13 @@ jobs:
             --framework cloudformation \
             --config-file .checkov.yaml \
             --output sarif \
-            --soft-fail > checkov-results.sarif
+            --soft-fail \
+            --output-file-path .
 
           # Parse summary counts from SARIF
           PASSED=$(python3 -c "
           import json
-          with open('checkov-results.sarif') as f:
+          with open('results_sarif.sarif') as f:
               data = json.load(f)
           runs = data.get('runs', [{}])
           results = runs[0].get('results', [])
@@ -169,7 +170,7 @@ jobs:
 
           FAILED=$(python3 -c "
           import json
-          with open('checkov-results.sarif') as f:
+          with open('results_sarif.sarif') as f:
               data = json.load(f)
           runs = data.get('runs', [{}])
           results = runs[0].get('results', [])
@@ -185,7 +186,7 @@ jobs:
         uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
-          sarif_file: checkov-results.sarif
+          sarif_file: results_sarif.sarif
           category: checkov
 
   # ── JOB 4: Post PR Comment ───────────────────────────────────────
