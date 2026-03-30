@@ -48,9 +48,11 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-              StringLike:
-                # Only the main branch of your specific repo can assume this role
-                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main'
+                # Scope to your specific repo — wildcards handled by StringLike below
+                token.actions.githubusercontent.com:sub:
+                  - !Sub 'repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main'
+                  - !Sub 'repo:${GitHubOrg}/${GitHubRepo}:environment:staging'
+                  - !Sub 'repo:${GitHubOrg}/${GitHubRepo}:environment:production'
       Policies:
         - PolicyName: DeployPolicy
           PolicyDocument:
