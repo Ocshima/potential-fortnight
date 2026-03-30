@@ -119,7 +119,6 @@ Resources:
                   - s3:GetBucketOwnershipControls
                   - s3:GetBucketAcl
                   - s3:PutBucketAcl
-                  - s3:DeleteLifecycleConfiguration
                   - s3:TagResource
                   - s3:GetBucketTagging
                   - s3:PutBucketTagging
