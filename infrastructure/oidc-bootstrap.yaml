@@ -117,6 +117,9 @@ Resources:
                   - s3:GetLifecycleConfiguration
                   - s3:PutBucketOwnershipControls
                   - s3:GetBucketOwnershipControls
+                  - s3:TagResource
+                  - s3:GetBucketTagging
+                  - s3:PutBucketTagging
                 Resource: !Sub 'arn:aws:s3:::${AWS::AccountId}-*'
 
               # CloudFront - create distribution and invalidate cache
