@@ -4,27 +4,38 @@
 # Requires: aws-cli v2, cfn-lint (pip install cfn-lint)
 # ============================================================
 
-STACK_NAME   ?= secure-static-site
-REGION       ?= us-east-1
-DOMAIN       ?= $(shell aws cloudformation describe-stacks \
-                  --stack-name $(STACK_NAME) --region $(REGION) \
-                  --query "Stacks[0].Outputs[?OutputKey=='WebsiteURL'].OutputValue" \
-                  --output text 2>/dev/null)
-BUCKET       ?= $(shell aws cloudformation describe-stacks \
-                  --stack-name $(STACK_NAME) --region $(REGION) \
-                  --query "Stacks[0].Outputs[?OutputKey=='ContentBucketName'].OutputValue" \
-                  --output text 2>/dev/null)
-DIST_ID      ?= $(shell aws cloudformation describe-stacks \
-                  --stack-name $(STACK_NAME) --region $(REGION) \
-                  --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDistributionId'].OutputValue" \
-                  --output text 2>/dev/null)
-ATHENA_BUCKET ?= $(shell aws cloudformation describe-stacks \
-                  --stack-name $(STACK_NAME) --region $(REGION) \
-                  --query "Stacks[0].Outputs[?OutputKey=='AthenaResultsBucketName'].OutputValue" \
-                  --output text 2>/dev/null)
+STACK_NAME        ?= secure-static-site
+STAGING_STACK     ?= secure-static-site-staging
+REGION            ?= us-east-1
+DOMAIN            ?= $(shell aws cloudformation describe-stacks \
+                       --stack-name $(STACK_NAME) --region $(REGION) \
+                       --query "Stacks[0].Outputs[?OutputKey=='WebsiteURL'].OutputValue" \
+                       --output text 2>/dev/null)
+BUCKET            ?= $(shell aws cloudformation describe-stacks \
+                       --stack-name $(STACK_NAME) --region $(REGION) \
+                       --query "Stacks[0].Outputs[?OutputKey=='ContentBucketName'].OutputValue" \
+                       --output text 2>/dev/null)
+DIST_ID           ?= $(shell aws cloudformation describe-stacks \
+                       --stack-name $(STACK_NAME) --region $(REGION) \
+                       --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDistributionId'].OutputValue" \
+                       --output text 2>/dev/null)
+ATHENA_BUCKET     ?= $(shell aws cloudformation describe-stacks \
+                       --stack-name $(STACK_NAME) --region $(REGION) \
+                       --query "Stacks[0].Outputs[?OutputKey=='AthenaResultsBucketName'].OutputValue" \
+                       --output text 2>/dev/null)
+STAGING_BUCKET    ?= $(shell aws cloudformation describe-stacks \
+                       --stack-name $(STAGING_STACK) --region $(REGION) \
+                       --query "Stacks[0].Outputs[?OutputKey=='ContentBucketName'].OutputValue" \
+                       --output text 2>/dev/null)
+STAGING_ATHENA    ?= $(shell aws cloudformation describe-stacks \
+                       --stack-name $(STAGING_STACK) --region $(REGION) \
+                       --query "Stacks[0].Outputs[?OutputKey=='AthenaResultsBucketName'].OutputValue" \
+                       --output text 2>/dev/null)
 
 .PHONY: help lint validate deploy-bootstrap deploy-infra deploy-website \
-        invalidate outputs destroy empty-bucket empty-athena-results clean-athena
+        invalidate outputs destroy destroy-staging destroy-all \
+        empty-bucket empty-athena-results clean-athena \
+        empty-staging-bucket empty-staging-athena clean-staging-athena
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -137,13 +148,61 @@ clean-athena: ## Force-delete the Athena WorkGroup and all its contents
 	  && echo "✅ Athena WorkGroup deleted." \
 	  || echo "ℹ️  WorkGroup not found or already deleted — continuing."
 
-destroy: ## ⚠️ Delete stack and all resources 
+destroy: ## ⚠️ Delete production stack and all its resources
 	@echo "⚠️  Deleting stack: $(STACK_NAME)"
 	@read -p "   Type the stack name to confirm: " confirm; \
-	  [ "$$confirm" = "$(STACK_NAME)" ] || (echo "Aborted." && exit 1) 
+	  [ "$$confirm" = "$(STACK_NAME)" ] || (echo "Aborted." && exit 1)
 	@$(MAKE) empty-bucket
 	@$(MAKE) empty-athena-results
 	@$(MAKE) clean-athena
 	aws cloudformation delete-stack --stack-name $(STACK_NAME) --region $(REGION)
 	aws cloudformation wait stack-delete-complete --stack-name $(STACK_NAME) --region $(REGION)
-	@echo "✅ Stack deleted."
+	@echo "✅ Production stack deleted."
+
+empty-staging-bucket: ## Empty the versioned staging content bucket
+	@echo "🗑️  Emptying staging content bucket: $(STAGING_BUCKET)"
+	@if [ -n "$(STAGING_BUCKET)" ]; then \
+		VERSIONS=$$(aws s3api list-object-versions --bucket $(STAGING_BUCKET) --query 'Versions[].{Key:Key,VersionId:VersionId}' --output json); \
+		if [ "$$VERSIONS" != "null" ] && [ "$$VERSIONS" != "[]" ]; then \
+			aws s3api delete-objects --bucket $(STAGING_BUCKET) --delete "{\"Objects\":$$VERSIONS}"; \
+		fi; \
+		MARKERS=$$(aws s3api list-object-versions --bucket $(STAGING_BUCKET) --query 'DeleteMarkers[].{Key:Key,VersionId:VersionId}' --output json); \
+		if [ "$$MARKERS" != "null" ] && [ "$$MARKERS" != "[]" ]; then \
+			aws s3api delete-objects --bucket $(STAGING_BUCKET) --delete "{\"Objects\":$$MARKERS}"; \
+		fi; \
+	fi
+	@echo "✅ Staging content bucket emptied."
+
+empty-staging-athena: ## Empty the staging Athena results bucket
+	@echo "🗑️  Emptying staging Athena results bucket: $(STAGING_ATHENA)"
+	@if [ -n "$(STAGING_ATHENA)" ]; then \
+		aws s3 rm s3://$(STAGING_ATHENA) --recursive --region $(REGION) 2>/dev/null || true; \
+	fi
+	@echo "✅ Staging Athena results bucket emptied."
+
+clean-staging-athena: ## Force-delete the staging Athena WorkGroup
+	@echo "🧹 Force-deleting Athena WorkGroup: $(STAGING_STACK)-logs"
+	@aws athena delete-work-group \
+		--work-group $(STAGING_STACK)-logs \
+		--recursive-delete-option \
+		--region $(REGION) 2>/dev/null \
+	  && echo "✅ Staging Athena WorkGroup deleted." \
+	  || echo "ℹ️  WorkGroup not found or already deleted — continuing."
+
+destroy-staging: ## ⚠️ Delete staging stack and all its resources
+	@echo "⚠️  Deleting stack: $(STAGING_STACK)"
+	@read -p "   Type the stack name to confirm: " confirm; \
+	  [ "$$confirm" = "$(STAGING_STACK)" ] || (echo "Aborted." && exit 1)
+	@$(MAKE) empty-staging-bucket
+	@$(MAKE) empty-staging-athena
+	@$(MAKE) clean-staging-athena
+	aws cloudformation delete-stack --stack-name $(STAGING_STACK) --region $(REGION)
+	aws cloudformation wait stack-delete-complete --stack-name $(STAGING_STACK) --region $(REGION)
+	@echo "✅ Staging stack deleted."
+
+destroy-all: ## ⚠️ Delete both staging and production stacks
+	@echo "⚠️  This will delete BOTH staging and production stacks."
+	@read -p "   Type 'destroy-all' to confirm: " confirm; \
+	  [ "$$confirm" = "destroy-all" ] || (echo "Aborted." && exit 1)
+	@$(MAKE) destroy-staging
+	@$(MAKE) destroy

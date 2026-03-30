@@ -137,6 +137,7 @@ Resources:
                   - cloudfront:GetDistributionConfig
                   - cloudfront:ListDistributions
                   - cloudfront:CreateInvalidation
+                  - cloudfront:GetInvalidation
                   # Origin Access Control
                   - cloudfront:CreateOriginAccessControl
                   - cloudfront:GetOriginAccessControl
