@@ -64,6 +64,16 @@ jobs:
           cfn-lint infrastructure/template.yaml --include-checks W
           cfn-lint infrastructure/oidc-bootstrap.yaml --include-checks W
 
+      - name: Debug OIDC token claims
+        run: |
+          TOKEN=$(curl -fsSL \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" \
+            | jq -r '.value')
+          echo "=== OIDC Token Claims ==="
+          echo "$TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | jq '{sub,aud,iss,repository,ref}'
+          echo "========================="
+
       - name: Validate against AWS API
         uses: aws-actions/configure-aws-credentials@v4
         with:
