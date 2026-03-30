@@ -160,7 +160,10 @@ Resources:
                   - wafv2:GetWebACL
                   - wafv2:ListWebACLs
                   - wafv2:TagResource
-                Resource: !Sub 'arn:aws:wafv2:us-east-1:${AWS::AccountId}:global/webacl/*'
+                Resource: '*'
+                # Resource: '*' required — CreateWebACL with managed rule groups
+                # also needs access to global/managedruleset/* (AWS-owned ARNs),
+                # which cannot be expressed as an account-scoped resource.
 
               # Route53 - create DNS records
               - Sid: Route53
