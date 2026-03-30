@@ -145,10 +145,16 @@ jobs:
             --framework cloudformation \
             --config-file .checkov.yaml \
             --output cli \
-            --output sarif \
-            --output-file-path console,checkov-results.sarif \
             --soft-fail
           EXIT_CODE=$?
+          set -e
+
+          checkov \
+            --directory infrastructure/ \
+            --framework cloudformation \
+            --config-file .checkov.yaml \
+            --output sarif \
+            --soft-fail > checkov-results.sarif
 
           # Parse summary counts from SARIF
           PASSED=$(python3 -c "
@@ -176,7 +182,7 @@ jobs:
           exit $EXIT_CODE
 
       - name: Upload SARIF to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: checkov-results.sarif
