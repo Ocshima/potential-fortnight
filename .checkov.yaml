@@ -1,0 +1,72 @@
+# .checkov.yaml
+# Checkov configuration for the secure-static-site infrastructure.
+#
+# Each skipped check below includes a documented justification.
+# Any new skip added here should follow the same pattern — the reason
+# must explain WHY the control does not apply, not just THAT it's skipped.
+#
+# Checkov docs: https://www.checkov.io/2.Basics/CLI%20Command%20Reference.html
+
+compact: true
+framework:
+  - cloudformation
+
+skip-check:
+
+  # ── S3 ─────────────────────────────────────────────────────────
+
+  - CKV_AWS_18
+  # Rule: S3 bucket should have access logging enabled
+  # Resource: LogsBucket, AthenaResultsBucket
+  # Justification:
+  #   LogsBucket IS the access log destination — enabling logging on
+  #   the log bucket itself would create a circular dependency and is
+  #   explicitly not supported by AWS.
+  #   AthenaResultsBucket holds short-lived query results (30-day TTL).
+  #   Access logging these results adds cost with no security benefit;
+  #   the queries themselves are auditable via CloudTrail.
+
+  - CKV_AWS_21
+  # Rule: S3 bucket should have versioning enabled
+  # Resource: AthenaResultsBucket
+  # Justification:
+  #   Query results are ephemeral outputs, not source data. Versioning
+  #   would retain every result set indefinitely, significantly increasing
+  #   storage costs with no recovery value. The 30-day lifecycle expiry
+  #   handles cleanup.
+
+  # ── WAFv2 ────────────────────────────────────────────────────────
+
+  - CKV2_AWS_31
+  # Rule: WAFv2 WebACL should have logging enabled
+  # Resource: WebACL
+  # Justification:
+  #   WAF logging requires a Kinesis Firehose or S3 delivery stream,
+  #   adding ~$15-20/month to the stack cost — disproportionate for a
+  #   portfolio static site. CloudFront access logs (which include WAF
+  #   block indicators via x_edge_result_type) provide sufficient
+  #   observability for this use case. Enable WAF logging when this
+  #   pattern is applied to a production workload.
+
+  # ── CloudFront ────────────────────────────────────────────────────
+
+  - CKV_AWS_305
+  # Rule: CloudFront distribution should not use the default certificate
+  # Resource: CloudFrontDistribution
+  # Justification:
+  #   The default CloudFront certificate (*.cloudfront.net) is used in
+  #   the no-custom-domain configuration. When a custom domain is enabled
+  #   (by uncommenting the ACM certificate and Aliases blocks in the
+  #   template), TLSv1.2_2021 is enforced via MinimumProtocolVersion.
+  #   The default cert is acceptable for the .cloudfront.net domain as
+  #   TLS is still enforced end-to-end.
+
+  - CKV_AWS_310
+  # Rule: CloudFront distribution should have origin failover configured
+  # Resource: CloudFrontDistribution
+  # Justification:
+  #   Origin failover requires a secondary S3 origin. For a static site
+  #   with a single S3 content bucket, S3's built-in 11-nines durability
+  #   and multi-AZ replication make a failover origin unnecessary. S3
+  #   itself does not experience the kinds of AZ-level failures that
+  #   failover is designed to handle.

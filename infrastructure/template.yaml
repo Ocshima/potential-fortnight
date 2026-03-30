@@ -58,6 +58,14 @@ Resources:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: >
+              This bucket IS the access log destination for CloudFront and S3.
+              Enabling access logging on the logging bucket itself is circular
+              and explicitly not supported by AWS.
     Properties:
       BucketName: !Sub '${AWS::AccountId}-${DomainName}-logs'
       OwnershipControls:
@@ -193,6 +201,19 @@ Resources:
   # ── 3. ATHENA RESULTS BUCKET ────────────────────────────────────
   AthenaResultsBucket:
     Type: AWS::S3::Bucket
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: >
+              Athena query results are short-lived ephemeral outputs (30-day TTL).
+              Access logging adds cost with no meaningful security benefit;
+              query activity is auditable via CloudTrail.
+          - id: W41
+            reason: >
+              Versioning is intentionally disabled on the results bucket.
+              Query results are transient outputs — versioning would retain
+              every result set and significantly increase storage costs.
     Properties:
       BucketName: !Sub '${AWS::AccountId}-${DomainName}-athena-results'
       LifecycleConfiguration:
@@ -235,6 +256,16 @@ Resources:
   # Rules are evaluated in priority order (lower number = higher priority).
   WebACL:
     Type: AWS::WAFv2::WebACL
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W68
+            reason: >
+              WAF logging requires Kinesis Firehose or S3 delivery (~$15-20/month
+              additional cost). CloudFront access logs provide sufficient
+              observability for this static site portfolio workload via the
+              x_edge_result_type field. Enable WAF logging for production
+              workloads with compliance requirements.
     Properties:
       Name: !Sub '${AWS::StackName}-web-acl'
       Scope: CLOUDFRONT
@@ -389,6 +420,16 @@ Resources:
   # ── 8. CLOUDFRONT DISTRIBUTION ──────────────────────────────────
   CloudFrontDistribution:
     Type: AWS::CloudFront::Distribution
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W70
+            reason: >
+              Using the CloudFront default certificate (*.cloudfront.net) in the
+              no-custom-domain configuration. When a custom domain is enabled,
+              MinimumProtocolVersion: TLSv1.2_2021 is enforced via the ACM
+              certificate block (see commented section in template). TLS is
+              still enforced end-to-end via the default certificate.
     DependsOn:
     #  - Certificate -- Uncomment when using ACM certs for CloudFront
       - WebACL

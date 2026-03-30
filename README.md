@@ -6,7 +6,11 @@ A production-grade static website on AWS, built to demonstrate secure cloud arch
 
 ## Architecture Overview
 
-![Project Architecture](./assets/diagram.svg)
+![Project Architecture](./assets/infra-diagram.svg)
+
+(./assets/cicd-pipeline-diagram.svg)
+
+The deployment pipeline wrapping this infrastructure is documented in [docs/devsecops-pipeline.md](./docs/devsecops-pipeline.md).
 
 ---
 
@@ -35,7 +39,7 @@ The function runs at the edge with sub-millisecond overhead and is billed at ~$0
 
 ### Why OIDC for GitHub Actions instead of IAM access keys?
 
-Storing long-lived AWS access keys as GitHub secrets is an unnecessary security risk. OIDC lets GitHub Actions request a short-lived STS token (valid for the duration of the workflow run) by proving its identity to AWS via a JWT. If the repo is ever compromised, there are no credentials to exfiltrate. The IAM role trust policy is scoped to a specific repo *and* branch, so only pushes to `main` in your repo can assume the role.
+Storing long-lived AWS access keys as GitHub secrets is an unnecessary security risk. OIDC lets GitHub Actions request a short-lived STS token (valid for the duration of the workflow run) by proving its identity to AWS via a JWT. If the repo is ever compromised, there are no credentials to exfiltrate. The IAM role trust policy is scoped to a specific repo *and* branch, so only pushes to `main` in the repo can assume the role.
 
 ### Why PriceClass_100?
 
@@ -87,41 +91,57 @@ CloudFront access logs are delivered to S3 and queryable via Athena. The Glue ta
 ### Example: Check cache hit rate
 
 ```sql
-SELECT log_date, ROUND(
-    SUM(CASE WHEN x_edge_result_type = 'Hit' THEN 1 ELSE 0 END) * 100.0
-    / NULLIF(COUNT(*), 0), 2
-) AS cache_hit_pct
+SELECT
+    date,
+    COUNT(*)                                             AS total_requests,
+    SUM(CASE WHEN x_edge_result_type = 'Hit'
+             THEN 1 ELSE 0 END)                         AS cache_hits,
+    SUM(CASE WHEN x_edge_result_type = 'Miss'
+             THEN 1 ELSE 0 END)                         AS cache_misses,
+    SUM(CASE WHEN x_edge_result_type = 'RefreshHit'
+             THEN 1 ELSE 0 END)                         AS refresh_hits,
+    ROUND(
+        SUM(CASE WHEN x_edge_result_type = 'Hit' THEN 1 ELSE 0 END)
+        * 100.0 / NULLIF(COUNT(*), 0), 2
+    )                                                    AS cache_hit_pct,
+    ROUND(SUM(sc_bytes) / 1048576.0, 2)                 AS total_mb_served
 FROM cloudfront_access_logs
-WHERE log_date >= CURRENT_DATE - INTERVAL '7' DAY
-GROUP BY log_date ORDER BY log_date DESC;
+WHERE CAST(date AS DATE) >= CURRENT_DATE - INTERVAL '30' DAY -- Fixed casting
+GROUP BY date
+ORDER BY date DESC;
 ```
 
-A well-configured static site should show **>90% cache hit rate**. If it's lower, check your `Cache-Control` headers and CloudFront cache policy settings.
+A well-configured static site should show **>90% cache hit rate**. If it's lower, check the `Cache-Control` headers and CloudFront cache policy settings.
 
 ---
 
 ## DevOps Practices
 
-### CI/CD Pipeline (`.github/workflows/deploy.yml`)
+### CI/CD Pipeline
 
-Every push to `main` triggers a four-job pipeline:
+Two workflow files implement a full DevSecOps pipeline. See [docs/devsecops-pipeline.md](./docs/devsecops-pipeline.md) for full detail.
 
-```
-lint → deploy-infra → deploy-website → security-audit
-```
+**`pr-checks.yml`** — triggers on every PR to `main` touching `infrastructure/`.
 
-| Job | What it does |
+**`deploy.yml`** — triggers on push to `main`.
+
+(./assets/cicd-detailed-diagram.svg)
+
+| Stage | What it does |
 |---|---|
-| `lint` | Runs `cfn-lint` on both CloudFormation templates |
-| `deploy-infra` | Validates template against AWS API, deploys/updates stack |
-| `deploy-website` | Syncs HTML + assets to S3 with correct cache headers, invalidates CloudFront |
-| `security-audit` | Curls the live site and asserts all security headers are present |
+| `lint` | cfn-lint + AWS API template validation |
+| `security-scan` | cfn-nag (CFN-specific security) + checkov (1000+ IaC policies) |
+| `deploy-staging` | Deploys isolated staging stack; validates template against real AWS APIs |
+| `smoke-staging` | HTTP check + security header audit against staging CloudFront URL |
+| `approve-production` | Pauses for manual reviewer approval via GitHub Environment protection |
+| `deploy-production` | Deploys production stack, syncs content, waits for CF invalidation |
+| `smoke-production` | Full security header audit with value assertions on production |
 
 **Cache header strategy:**
 - `*.html` → `max-age=300` (5 minutes): allows content to update quickly
 - All other assets → `max-age=31536000, immutable` (1 year): aggressive caching for performance
 
-The pipeline uses **path-based concurrency** — a second push to `main` while a deploy is in progress cancels the in-progress run, preventing race conditions.
+The pipeline uses **concurrency groups** — a second push cancels any in-progress run, preventing race conditions and double-deploys.
 
 ### Infrastructure as Code
 
@@ -149,7 +169,7 @@ The entire stack is described in `infrastructure/template.yaml`. Nothing is crea
 
 ### Cost discipline
 
-The `Makefile` includes a `make destroy` target that safely tears down all resources when you're not actively demonstrating the project. The `LogsBucket` has `DeletionPolicy: Retain` so historical logs are preserved even after teardown.
+The `Makefile` includes a `make destroy` target that safely tears down all resources when not actively demonstrating the project. The `LogsBucket` has `DeletionPolicy: Retain` so historical logs are preserved even after teardown.
 
 ---
 
@@ -170,11 +190,11 @@ The `Makefile` includes a `make destroy` target that safely tears down all resou
 make deploy-bootstrap GITHUB_ORG=your-username GITHUB_REPO=your-repo-name
 ```
 
-Copy the `RoleArn` output into your GitHub repository secrets as `AWS_ROLE_ARN`.
+Copy the `RoleArn` output into the GitHub repository secrets as `AWS_ROLE_ARN`.
 
 ### Step 2 — Add GitHub secrets
 
-In your repo → Settings → Secrets and variables → Actions:
+In the repo → Settings → Secrets and variables → Actions:
 
 | Secret | Value |
 |---|---|
@@ -208,7 +228,11 @@ curl -sI https://yourdomain.com | grep -E 'strict-transport|content-security|x-f
 ## Teardown
 
 ```bash
+# Destroy production stack
 make destroy
+
+# Destroy staging stack (if deployed)
+make destroy STACK_NAME=secure-static-site-staging
 ```
 
-This empties the content bucket and deletes the stack. The `LogsBucket` is retained by CloudFormation policy — empty and delete it manually via the console or CLI if you want a full cleanup.
+Both commands empty their respective S3 buckets before deleting the stack. The `LogsBucket` on the production stack has `DeletionPolicy: Retain` — empty and delete it manually if you want a full cleanup. The staging stack's log bucket does not have this policy and is deleted with the stack.

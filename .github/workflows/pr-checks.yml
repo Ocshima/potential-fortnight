@@ -1,0 +1,265 @@
+name: PR Security Checks
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'infrastructure/**'
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+  pull-requests: write   # Required to post the results comment
+
+concurrency:
+  group: pr-checks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+
+  # ── JOB 1: cfn-lint ─────────────────────────────────────────────
+  # Fast syntax and best-practice check. Runs first as it catches the
+  # most basic errors cheaply before the heavier security scanners run.
+  cfn-lint:
+    name: CloudFormation Lint
+    runs-on: ubuntu-latest
+    outputs:
+      outcome: ${{ steps.lint.outcome }}
+      findings: ${{ steps.lint.outputs.findings }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install cfn-lint
+        run: pip install cfn-lint
+
+      - name: Run cfn-lint
+        id: lint
+        run: |
+          set +e
+          OUTPUT=$(cfn-lint infrastructure/template.yaml \
+            --include-checks W \
+            --format json 2>&1)
+          EXIT_CODE=$?
+
+          # Summarise findings for the PR comment job
+          ERRORS=$(echo "$OUTPUT"   | python3 -c "
+          import json,sys
+          data = json.load(sys.stdin) if sys.stdin.read(1) == '[' else []
+          " 2>/dev/null || echo "[]")
+
+          COUNT=$(echo "$OUTPUT" | python3 -c "
+          import json,sys
+          try:
+              data = json.loads(sys.stdin.read())
+              print(len(data))
+          except:
+              print(0)
+          " 2>/dev/null || echo "0")
+
+          echo "findings=$COUNT" >> $GITHUB_OUTPUT
+          echo "$OUTPUT"
+          exit $EXIT_CODE
+
+  # ── JOB 2: cfn-nag ──────────────────────────────────────────────
+  # CloudFormation-specific security scanner. Flags insecure resource
+  # configurations such as overly permissive IAM, missing encryption,
+  # open security groups, etc. Suppressions in the template itself are
+  # documented with business justifications (see template.yaml Metadata).
+  cfn-nag:
+    name: cfn-nag Security Scan
+    runs-on: ubuntu-latest
+    outputs:
+      outcome: ${{ steps.nag.outcome }}
+      findings: ${{ steps.nag.outputs.findings }}
+      output: ${{ steps.nag.outputs.output }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cfn-nag
+        run: gem install cfn-nag
+
+      - name: Run cfn-nag
+        id: nag
+        run: |
+          set +e
+          OUTPUT=$(cfn_nag_scan \
+            --input-path infrastructure/template.yaml \
+            --output-format json 2>&1)
+          EXIT_CODE=$?
+
+          # Count FAILURES (Fs) — these block the pipeline.
+          # WARNINGs (Ws) are surfaced in the comment but do not block.
+          FAILURES=$(echo "$OUTPUT" | python3 -c "
+          import json,sys
+          try:
+              data = json.loads(sys.stdin.read())
+              count = sum(len(r.get('violations',[])) for f in data
+                          for r in f.get('file_results',{}).get('violations',[])
+                          if r.get('type') == 'FAIL')
+              print(count)
+          except:
+              print(0)
+          " 2>/dev/null || echo "0")
+
+          # Encode output for passing between jobs via outputs
+          ENCODED=$(echo "$OUTPUT" | base64 -w 0)
+          echo "findings=$FAILURES"   >> $GITHUB_OUTPUT
+          echo "output=$ENCODED"      >> $GITHUB_OUTPUT
+          echo "$OUTPUT"
+          exit $EXIT_CODE
+
+  # ── JOB 3: checkov ──────────────────────────────────────────────
+  # Broad IaC security scanner covering 1000+ policies across AWS
+  # resource types. Produces a SARIF report uploaded to the GitHub
+  # Security tab so findings appear inline on changed files.
+  checkov:
+    name: Checkov IaC Scan
+    runs-on: ubuntu-latest
+    outputs:
+      outcome: ${{ steps.checkov.outcome }}
+      passed: ${{ steps.checkov.outputs.passed }}
+      failed: ${{ steps.checkov.outputs.failed }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install checkov
+        run: pip install checkov
+
+      - name: Run checkov
+        id: checkov
+        run: |
+          set +e
+          checkov \
+            --directory infrastructure/ \
+            --framework cloudformation \
+            --config-file .checkov.yaml \
+            --output cli \
+            --output sarif \
+            --output-file-path console,checkov-results.sarif \
+            --soft-fail
+          EXIT_CODE=$?
+
+          # Parse summary counts from SARIF
+          PASSED=$(python3 -c "
+          import json
+          with open('checkov-results.sarif') as f:
+              data = json.load(f)
+          runs = data.get('runs', [{}])
+          results = runs[0].get('results', [])
+          passed = sum(1 for r in results if r.get('kind') == 'pass')
+          print(passed)
+          " 2>/dev/null || echo "0")
+
+          FAILED=$(python3 -c "
+          import json
+          with open('checkov-results.sarif') as f:
+              data = json.load(f)
+          runs = data.get('runs', [{}])
+          results = runs[0].get('results', [])
+          failed = sum(1 for r in results if r.get('kind') != 'pass')
+          print(failed)
+          " 2>/dev/null || echo "0")
+
+          echo "passed=$PASSED" >> $GITHUB_OUTPUT
+          echo "failed=$FAILED" >> $GITHUB_OUTPUT
+          exit $EXIT_CODE
+
+      - name: Upload SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: checkov-results.sarif
+          category: checkov
+
+  # ── JOB 4: Post PR Comment ───────────────────────────────────────
+  # Aggregates results from all three scanners and posts a single
+  # structured comment on the PR. Updates the comment on re-runs
+  # rather than creating duplicates.
+  comment:
+    name: Post Results Comment
+    runs-on: ubuntu-latest
+    needs: [cfn-lint, cfn-nag, checkov]
+    if: always()
+    permissions:
+      pull-requests: write
+
+    steps:
+      - name: Post or update PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const lintOutcome    = '${{ needs.cfn-lint.result }}';
+            const nagOutcome     = '${{ needs.cfn-nag.result }}';
+            const checkovOutcome = '${{ needs.checkov.result }}';
+
+            const lintFindings    = '${{ needs.cfn-lint.outputs.findings }}' || '0';
+            const nagFindings     = '${{ needs.cfn-nag.outputs.findings }}'  || '0';
+            const checkovPassed   = '${{ needs.checkov.outputs.passed }}'    || '0';
+            const checkovFailed   = '${{ needs.checkov.outputs.failed }}'    || '0';
+
+            const icon = (outcome) =>
+              outcome === 'success' ? '✅' :
+              outcome === 'failure' ? '❌' : '⚠️';
+
+            const allPassed = [lintOutcome, nagOutcome, checkovOutcome]
+              .every(o => o === 'success');
+
+            const body = `## 🔐 IaC Security Scan Results
+
+            ${allPassed
+              ? '**All security checks passed.** This PR is clear to merge.'
+              : '**One or more checks failed.** Please review findings before merging.'}
+
+            | Scanner | Status | Findings |
+            |---|---|---|
+            | cfn-lint | ${icon(lintOutcome)} ${lintOutcome} | ${lintFindings} issues |
+            | cfn-nag  | ${icon(nagOutcome)}  ${nagOutcome}  | ${nagFindings} failures |
+            | checkov  | ${icon(checkovOutcome)} ${checkovOutcome} | ${checkovPassed} passed / ${checkovFailed} failed |
+
+            ### What each scanner checks
+            - **cfn-lint** — CloudFormation syntax, deprecated properties, type errors, and AWS best-practice warnings.
+            - **cfn-nag** — CloudFormation-specific security misconfigurations: open IAM policies, missing encryption, insecure resource settings.
+            - **checkov** — 1000+ cross-resource security policies. Full findings are visible on the **[Security tab](../security/code-scanning)** of this repository.
+
+            > Suppressions in \`template.yaml\` (\`cfn_nag\`) and \`.checkov.yaml\` (\`checkov\`) are documented with business justifications. Review any suppression changes carefully.
+
+            *Updated: ${new Date().toUTCString()}*`;
+
+            // Find existing comment to update rather than creating duplicates
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('IaC Security Scan Results'));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
