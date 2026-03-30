@@ -152,6 +152,9 @@ Resources:
                 Resource: '*'
 
               # WAFv2 - create and manage the Web ACL
+              # Resource: '*' required — managed rule group ARNs are AWS-owned
+              # (global/managedruleset/*) and cannot be expressed account-scoped.
+              # CloudFormation also calls tagging APIs on the created WebACL ARN.
               - Sid: WAF
                 Effect: Allow
                 Action:
@@ -161,10 +164,12 @@ Resources:
                   - wafv2:GetWebACL
                   - wafv2:ListWebACLs
                   - wafv2:TagResource
+                  - wafv2:UntagResource
+                  - wafv2:ListTagsForResource
+                  - wafv2:AssociateWebACL
+                  - wafv2:DisassociateWebACL
+                  - wafv2:GetWebACLForResource
                 Resource: '*'
-                # Resource: '*' required — CreateWebACL with managed rule groups
-                # also needs access to global/managedruleset/* (AWS-owned ARNs),
-                # which cannot be expressed as an account-scoped resource.
 
               # Route53 - create DNS records
               - Sid: Route53
