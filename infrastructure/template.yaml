@@ -464,7 +464,7 @@ Resources:
               OriginAccessIdentity: ''  # Empty string required when using OAC (not OAI)
         DefaultCacheBehavior:
           TargetOriginId: S3Origin
-          ViewerProtocolPolicy: redirect-to-https  # HTTP → HTTPS redirect at the edge
+          ViewerProtocolPolicy: redirect-to-https  # HTTP -> HTTPS redirect at the edge
           # CachingOptimized: caches based on query string and compression;
           # suitable for static assets. TTL defaults: min 1s, default 86400s, max 31536000s.
           CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
