@@ -10,7 +10,7 @@ Infrastructure:
 ![Project Architecture](./assets/infra-diagram.svg)
 
 CI/CD Pipeline:
-![CI/CD Pipeline](./assets/cicd-pipeline-diagram.svg)
+![CI/CD Pipeline](./assets/cicd-pipeline-diagram.png)
 
 The deployment pipeline wrapping this infrastructure is documented in [docs/devsecops-pipeline.md](./docs/devsecops-pipeline.md).
 
